@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clash Rules Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "shiki": "https://esm.sh/shiki@1.0.0"
+        }
+      }
+    </script>
+    <style>
+      .shiki-container pre {
+        margin: 0;
+        padding: 0;
+        border-radius: 0.5rem;
+        overflow-x: auto;
+        font-size: 0.875rem;
+        line-height: 1.5rem; /* 24px, matches textarea leading-6 */
+      }
+      .shiki-container code {
+        font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      }
+      textarea {
+        font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      }
+      .copy-btn {
+        transition: all 0.1s ease;
+      }
+      .copy-btn:hover {
+        transform: scale(1.05);
+      }
+      #root {
+        visibility: hidden;
+      }
+      #root.ready {
+        visibility: visible;
+      }
+    </style>
+  </head>
+  <body class="bg-gray-50 min-h-screen">
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+      const { useState, useEffect, useCallback, useRef } = React
+
+      const STORAGE_KEY = 'clash-rules-config'
+      const DEFAULT_POLICY = 'Proxies'
+
+      const RULE_TYPES = [
+        {
+          key: 'DOMAIN-KEYWORD',
+          label: 'DOMAIN-KEYWORD',
+          placeholder: '每行一个关键词，如:\nchatgpt\nclaude',
+        },
+        {
+          key: 'DOMAIN-SUFFIX',
+          label: 'DOMAIN-SUFFIX',
+          placeholder: '每行一个域名后缀，如:\nchatgpt.com\ngoogle.com',
+        },
+        {
+          key: 'PROCESS-NAME',
+          label: 'PROCESS-NAME',
+          placeholder: '每行一个进程名，如:\nChatGPT\nTelegram',
+        },
+        {
+          key: 'PROCESS-NAME-REGEX',
+          label: 'PROCESS-NAME-REGEX',
+          placeholder: '每行一个正则，如:\nCodex.*\nNotion.*',
+        },
+      ]
+
+      const DEFAULT_INPUTS = {
+        'DOMAIN-KEYWORD': 'chatgpt',
+        'DOMAIN-SUFFIX': 'chatgpt.com',
+        'PROCESS-NAME': 'ChatGPT',
+        'PROCESS-NAME-REGEX': 'Codex.*',
+      }
+
+      // Shiki highlighter loader
+      let shikiHighlighter = null
+      const loadShiki = async () => {
+        if (shikiHighlighter) return shikiHighlighter
+        try {
+          const shiki = await import('shiki')
+          // Try different API versions
+          if (shiki.createHighlighter) {
+            shikiHighlighter = await shiki.createHighlighter({
+              themes: ['github-dark'],
+              langs: ['yaml'],
+            })
+          } else if (shiki.getHighlighter) {
+            shikiHighlighter = await shiki.getHighlighter({
+              themes: ['github-dark'],
+              langs: ['yaml'],
+            })
+          } else {
+            throw new Error('Shiki API not found')
+          }
+          return shikiHighlighter
+        } catch (e) {
+          console.error('Failed to load Shiki:', e)
+          return null
+        }
+      }
+
+      // Editable YAML Editor with Syntax Highlighting
+      function YamlEditor({ code, onChange }) {
+        const [html, setHtml] = useState('')
+        const textareaRef = useRef(null)
+
+        useEffect(() => {
+          let cancelled = false
+          loadShiki().then(highlighter => {
+            if (cancelled || !highlighter) return
+            try {
+              const highlighted = highlighter.codeToHtml(code, {
+                lang: 'yaml',
+                theme: 'github-dark',
+              })
+              setHtml(highlighted)
+            } catch (e) {
+              console.error('Shiki highlight error:', e)
+            }
+          })
+          return () => {
+            cancelled = true
+          }
+        }, [code])
+
+        // Calculate height based on line count
+        const lineCount = code.split('\n').length
+        const lineHeight = 24 // 1.5rem * 16px = 24px (leading-6)
+        const padding = 32 // p-4 = 16px * 2
+        const calculatedHeight = Math.max(120, lineCount * lineHeight + padding)
+
+        return (
+          <div className="relative rounded-lg overflow-hidden bg-[#24292e]" style={{ height: calculatedHeight + 'px' }}>
+            {/* Syntax highlighted layer (background) */}
+            <div className="absolute inset-0 overflow-hidden pointer-events-none p-4">
+              {html ? (
+                <div
+                  className="shiki-container"
+                  style={{ background: 'transparent' }}
+                  dangerouslySetInnerHTML={{
+                    __html: html.replace(/background-color:[^;]+;?/g, ''),
+                  }}
+                />
+              ) : (
+                <pre className="text-gray-300 text-sm font-mono whitespace-pre-wrap">{code}</pre>
+              )}
+            </div>
+            {/* Editable textarea (foreground, transparent text) */}
+            <textarea
+              ref={textareaRef}
+              value={code}
+              onChange={e => onChange(e.target.value)}
+              className="absolute inset-0 w-full h-full bg-transparent resize-none outline-none p-4 text-sm leading-6 overflow-hidden"
+              style={{
+                fontFamily: "'Menlo', 'Monaco', 'Courier New', monospace",
+                color: 'transparent',
+                caretColor: '#fff',
+              }}
+              spellCheck={false}
+            />
+          </div>
+        )
+      }
+
+      // Sort lines alphabetically (case-insensitive), preserving non-empty lines only
+      function sortLines(text) {
+        return text
+          .split('\n')
+          .map(l => l.trim())
+          .filter(l => l.length > 0)
+          .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
+          .join('\n')
+      }
+
+      // Parse YAML to inputs (and extract policy from the first rule)
+      // Throws on incomplete/malformed lines so callers can skip sync
+      function parseYamlToInputs(yamlContent) {
+        const inputs = {
+          'DOMAIN-KEYWORD': '',
+          'DOMAIN-SUFFIX': '',
+          'PROCESS-NAME': '',
+          'PROCESS-NAME-REGEX': '',
+        }
+
+        const lines = yamlContent.split('\n')
+        const prepend = []
+
+        let inPrepend = false
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (trimmed === 'prepend:') {
+            inPrepend = true
+            continue
+          }
+          if (trimmed === 'append:' || trimmed === 'delete:') {
+            inPrepend = false
+            continue
+          }
+          if (inPrepend) {
+            if (trimmed.length === 0 || trimmed === '[]') continue
+            if (trimmed.startsWith("- '")) {
+              const match = line.match(/- '([^']+)'/)
+              if (!match) throw new Error('Incomplete rule line')
+              prepend.push(match[1])
+            } else if (trimmed.startsWith('-')) {
+              throw new Error('Malformed rule line')
+            }
+          }
+        }
+
+        let parsedPolicy = null
+        if (prepend.length > 0) {
+          const parts = prepend[0].split(',')
+          if (parts.length >= 3) {
+            parsedPolicy = parts.slice(2).join(',')
+          }
+        }
+
+        const grouped = {}
+        for (const type of RULE_TYPES) {
+          grouped[type.key] = []
+        }
+
+        for (const rule of prepend) {
+          for (const type of RULE_TYPES) {
+            if (rule.startsWith(type.key + ',')) {
+              const parts = rule.split(',')
+              if (parts.length >= 2) {
+                grouped[type.key].push(parts[1])
+              }
+              break
+            }
+          }
+        }
+
+        for (const type of RULE_TYPES) {
+          inputs[type.key] = grouped[type.key].join('\n')
+        }
+
+        return { inputs, parsedPolicy }
+      }
+
+      // Generate YAML from inputs
+      function generateYaml(inputs, policy) {
+        const targetPolicy = policy || DEFAULT_POLICY
+        const rules = []
+
+        for (const type of RULE_TYPES) {
+          const values = inputs[type.key]
+            .split('\n')
+            .map(v => v.trim())
+            .filter(v => v.length > 0)
+
+          for (const value of values) {
+            rules.push(`${type.key},${value},${targetPolicy}`)
+          }
+        }
+
+        const prependLines = rules.map(r => `  - '${r}'`).join('\n')
+
+        return `prepend:
+${prependLines || '  []'}
+append: []
+delete: []`
+      }
+
+      // Copy button component
+      function CopyButton({ text }) {
+        const [copied, setCopied] = useState(false)
+
+        const handleCopy = async () => {
+          try {
+            await navigator.clipboard.writeText(text)
+            setCopied(true)
+            setTimeout(() => setCopied(false), 2000)
+          } catch (err) {
+            console.error('Failed to copy:', err)
+          }
+        }
+
+        return (
+          <button
+            onClick={handleCopy}
+            className={`copy-btn px-3 py-1.5 rounded-lg font-medium text-sm flex items-center gap-1.5 ${
+              copied ? 'bg-green-500 text-white' : 'bg-blue-500 hover:bg-blue-600 text-white'
+            }`}
+          >
+            {copied ? (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                已复制
+              </>
+            ) : (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                  />
+                </svg>
+                复制
+              </>
+            )}
+          </button>
+        )
+      }
+
+      // Paste button component
+      function PasteButton({ onPaste }) {
+        const [pasted, setPasted] = useState(false)
+
+        const handlePaste = async () => {
+          try {
+            const text = await navigator.clipboard.readText()
+            if (text) {
+              onPaste(text)
+              setPasted(true)
+              setTimeout(() => setPasted(false), 2000)
+            }
+          } catch (err) {
+            console.error('Failed to paste:', err)
+            // Fallback: prompt user to paste manually
+            const text = prompt('请粘贴 YAML 配置:')
+            if (text) {
+              onPaste(text)
+              setPasted(true)
+              setTimeout(() => setPasted(false), 2000)
+            }
+          }
+        }
+
+        return (
+          <button
+            onClick={handlePaste}
+            className={`copy-btn px-3 py-1.5 rounded-lg font-medium text-sm flex items-center gap-1.5 ${
+              pasted ? 'bg-green-500 text-white' : 'bg-gray-600 hover:bg-gray-700 text-white'
+            }`}
+          >
+            {pasted ? (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                已粘贴
+              </>
+            ) : (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
+                  />
+                </svg>
+                粘贴配置
+              </>
+            )}
+          </button>
+        )
+      }
+
+      // Auto-resize textarea hook
+      function useAutoResize(value) {
+        const ref = useRef(null)
+
+        useEffect(() => {
+          const textarea = ref.current
+          if (textarea) {
+            textarea.style.height = 'auto'
+            textarea.style.height = textarea.scrollHeight + 'px'
+          }
+        }, [value])
+
+        return ref
+      }
+
+      // Input card component
+      function InputCard({ type, value, onChange }) {
+        const textareaRef = useAutoResize(value)
+
+        return (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <label className="block text-sm font-semibold text-gray-700 mb-2">{type.label}</label>
+            <textarea
+              ref={textareaRef}
+              value={value}
+              onChange={e => onChange(type.key, e.target.value)}
+              placeholder={type.placeholder}
+              className="w-full min-h-[80px] px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none bg-gray-50 overflow-hidden"
+            />
+          </div>
+        )
+      }
+
+      // Main App
+      function App() {
+        const [inputs, setInputs] = useState({
+          'DOMAIN-KEYWORD': '',
+          'DOMAIN-SUFFIX': '',
+          'PROCESS-NAME': '',
+          'PROCESS-NAME-REGEX': '',
+        })
+
+        const [policy, setPolicy] = useState(DEFAULT_POLICY)
+        const [yamlContent, setYamlContent] = useState('')
+        const isUpdatingFromYaml = useRef(false)
+        const isUpdatingFromInputs = useRef(false)
+
+        // Reveal UI after mount so Tailwind CDN has time to generate styles
+        useEffect(() => {
+          setTimeout(() => {
+            document.getElementById('root').classList.add('ready')
+          }, 100)
+        }, [])
+
+        // Load from localStorage on mount
+        useEffect(() => {
+          const saved = localStorage.getItem(STORAGE_KEY)
+          if (saved) {
+            try {
+              const parsed = JSON.parse(saved)
+              const savedPolicy = parsed.policy || DEFAULT_POLICY
+              setInputs(parsed.inputs || {})
+              setPolicy(savedPolicy)
+              setYamlContent(parsed.yaml || generateYaml(parsed.inputs || {}, savedPolicy))
+            } catch (e) {
+              console.error('Failed to parse saved config:', e)
+            }
+          } else {
+            setInputs(DEFAULT_INPUTS)
+            setYamlContent(generateYaml(DEFAULT_INPUTS, DEFAULT_POLICY))
+          }
+        }, [])
+
+        // Global paste event listener for YAML detection
+        useEffect(() => {
+          const handlePaste = e => {
+            const activeEl = document.activeElement
+            const isInputFocused = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')
+            if (isInputFocused) return
+
+            const text = e.clipboardData?.getData('text')
+            if (!text) return
+
+            const isYamlConfig =
+              text.includes('prepend:') ||
+              /^\s*-\s*'(DOMAIN-KEYWORD|DOMAIN-SUFFIX|PROCESS-NAME|PROCESS-NAME-REGEX),/.test(text)
+
+            if (isYamlConfig) {
+              e.preventDefault()
+              try {
+                isUpdatingFromYaml.current = true
+                const { inputs: parsed, parsedPolicy } = parseYamlToInputs(text)
+                const newPolicy = parsedPolicy || policy
+                setInputs(parsed)
+                setPolicy(newPolicy)
+                setYamlContent(generateYaml(parsed, newPolicy))
+              } catch (err) {
+                // Malformed paste, ignore
+              } finally {
+                setTimeout(() => {
+                  isUpdatingFromYaml.current = false
+                }, 0)
+              }
+            }
+          }
+
+          document.addEventListener('paste', handlePaste)
+          return () => document.removeEventListener('paste', handlePaste)
+        }, [policy])
+
+        // Save to localStorage
+        useEffect(() => {
+          if (yamlContent) {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({ inputs, yaml: yamlContent, policy }))
+          }
+        }, [inputs, yamlContent, policy])
+
+        // Update YAML when inputs change
+        const handleInputChange = useCallback(
+          (key, value) => {
+            if (isUpdatingFromYaml.current) return
+
+            isUpdatingFromInputs.current = true
+            const newInputs = { ...inputs, [key]: value }
+            setInputs(newInputs)
+            setYamlContent(generateYaml(newInputs, policy))
+            setTimeout(() => {
+              isUpdatingFromInputs.current = false
+            }, 0)
+          },
+          [inputs, policy]
+        )
+
+        // Handle policy change
+        const handlePolicyChange = useCallback(
+          newPolicy => {
+            setPolicy(newPolicy)
+            setYamlContent(generateYaml(inputs, newPolicy))
+          },
+          [inputs]
+        )
+
+        // Handle YAML edit: one-way sync YAML → inputs
+        const handleYamlChange = useCallback(newYaml => {
+          if (isUpdatingFromInputs.current) return
+
+          setYamlContent(newYaml)
+          try {
+            isUpdatingFromYaml.current = true
+            const { inputs: parsed, parsedPolicy } = parseYamlToInputs(newYaml)
+            setInputs(parsed)
+            if (parsedPolicy) setPolicy(parsedPolicy)
+          } catch (e) {
+            // Parse error (user may still be typing), skip sync to inputs
+          } finally {
+            setTimeout(() => {
+              isUpdatingFromYaml.current = false
+            }, 0)
+          }
+        }, [])
+
+        // Format & sort all inputs, regenerate YAML
+        const handleFormat = useCallback(() => {
+          const sorted = {}
+          for (const type of RULE_TYPES) {
+            sorted[type.key] = sortLines(inputs[type.key])
+          }
+          setInputs(sorted)
+          setYamlContent(generateYaml(sorted, policy))
+        }, [inputs, policy])
+
+        // Clear all
+        const handleClear = () => {
+          const emptyInputs = {
+            'DOMAIN-KEYWORD': '',
+            'DOMAIN-SUFFIX': '',
+            'PROCESS-NAME': '',
+            'PROCESS-NAME-REGEX': '',
+          }
+          setInputs(emptyInputs)
+          setPolicy(DEFAULT_POLICY)
+          setYamlContent(generateYaml(emptyInputs, DEFAULT_POLICY))
+        }
+
+        // Reset to default
+        const handleReset = () => {
+          setInputs(DEFAULT_INPUTS)
+          setPolicy(DEFAULT_POLICY)
+          setYamlContent(generateYaml(DEFAULT_INPUTS, DEFAULT_POLICY))
+        }
+
+        return (
+          <div className="min-h-screen bg-linear-to-br from-gray-50 to-gray-100">
+            {/* Header */}
+            <header className="bg-white border-b border-gray-200 shadow-sm">
+              <div className="max-w-7xl mx-auto px-6 py-4">
+                <div>
+                  <h1 className="text-2xl font-bold text-gray-900">Clash Rules Manager</h1>
+                </div>
+              </div>
+            </header>
+
+            {/* Main Content */}
+            <main className="max-w-7xl mx-auto px-6 py-8">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                {/* Left: Input Tools */}
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <h2 className="text-lg font-semibold text-gray-800">规则输入</h2>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={handleReset}
+                        className="copy-btn px-2.5 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                        title="重置"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v5h5" />
+                        </svg>
+                        重置
+                      </button>
+                      <button
+                        onClick={handleClear}
+                        className="copy-btn px-2.5 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 transition-colors"
+                        title="清空"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M10 11v6M14 11v6" />
+                        </svg>
+                        清空
+                      </button>
+                      <PasteButton onPaste={handleYamlChange} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {RULE_TYPES.map(type => (
+                      <InputCard key={type.key} type={type} value={inputs[type.key]} onChange={handleInputChange} />
+                    ))}
+                  </div>
+                  <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">目标策略组</label>
+                    <input
+                      type="text"
+                      value={policy}
+                      onChange={e => handlePolicyChange(e.target.value)}
+                      placeholder="输入目标策略组名称，如: Proxies"
+                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-gray-50"
+                    />
+                  </div>
+                </div>
+
+                {/* Right: YAML Output */}
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <h2 className="text-lg font-semibold text-gray-800">YAML 配置</h2>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={handleFormat}
+                        className="copy-btn px-3 py-1.5 rounded-lg font-medium text-sm flex items-center gap-1.5 bg-blue-500 hover:bg-blue-600 text-white"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12"
+                          />
+                        </svg>
+                        格式化
+                      </button>
+                      <CopyButton text={yamlContent} />
+                    </div>
+                  </div>
+                  <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                    <YamlEditor code={yamlContent} onChange={handleYamlChange} />
+                  </div>
+                </div>
+              </div>
+            </main>
+          </div>
+        )
+      }
+
+      // Render
+      const root = ReactDOM.createRoot(document.getElementById('root'))
+      root.render(<App />)
+    </script>
+  </body>
+</html>
