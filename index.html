@@ -570,9 +570,19 @@ delete: []`
           <div className="min-h-screen bg-linear-to-br from-gray-50 to-gray-100">
             {/* Header */}
             <header className="bg-white border-b border-gray-200 shadow-sm">
-              <div className="max-w-7xl mx-auto px-6 py-4">
-                <div>
+              <div className="max-w-7xl mx-auto px-6 py-3">
+                <div className="flex items-center justify-between gap-4">
                   <h1 className="text-2xl font-bold text-gray-900">Clash Rules Manager</h1>
+                  <a
+                    href="https://github.com/a-vibe-tools/clash-rules-manager"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="copy-btn inline-flex h-10 w-10 items-center justify-center rounded-lg text-gray-600 hover:bg-gray-100 hover:text-gray-900 transition-colors"
+                    aria-label="打开 GitHub 仓库"
+                    title="GitHub"
+                  >
+                    <img src="./mdi--github.svg" alt="" className="h-6 w-6" />
+                  </a>
                 </div>
               </div>
             </header>
