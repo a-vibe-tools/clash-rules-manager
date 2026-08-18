@@ -59,22 +59,18 @@
         {
           key: 'DOMAIN-KEYWORD',
           label: 'DOMAIN-KEYWORD',
-          placeholder: 'One keyword per line, for example:\nchatgpt\nclaude',
         },
         {
           key: 'DOMAIN-SUFFIX',
           label: 'DOMAIN-SUFFIX',
-          placeholder: 'One domain suffix per line, for example:\nchatgpt.com\ngoogle.com',
         },
         {
           key: 'PROCESS-NAME',
           label: 'PROCESS-NAME',
-          placeholder: 'One process name per line, for example:\nChatGPT\nTelegram',
         },
         {
           key: 'PROCESS-NAME-REGEX',
           label: 'PROCESS-NAME-REGEX',
-          placeholder: 'One regular expression per line, for example:\nCodex.*\nNotion.*',
         },
       ]
 
@@ -403,7 +399,6 @@ delete: []`
               ref={textareaRef}
               value={value}
               onChange={e => onChange(type.key, e.target.value)}
-              placeholder={type.placeholder}
               className="w-full min-h-[80px] px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none bg-gray-50 overflow-hidden"
             />
           </div>
@@ -633,7 +628,6 @@ delete: []`
                       type="text"
                       value={policy}
                       onChange={e => handlePolicyChange(e.target.value)}
-                      placeholder="Enter a target policy group name, for example: Proxies"
                       className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-gray-50"
                     />
                   </div>
