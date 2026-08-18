@@ -52,8 +52,10 @@
     <script type="text/babel" data-type="module">
       const { useState, useEffect, useCallback, useRef } = React
 
-      const STORAGE_KEY = 'clash-rules-config'
+      const STORAGE_KEY = 'clash-rules-config:v2'
+      const LEGACY_STORAGE_KEY = 'clash-rules-config'
       const DEFAULT_POLICY = 'Proxies'
+      const POLICY_GROUPS = ['Proxies', 'DIRECT']
 
       const RULE_TYPES = [
         {
@@ -181,15 +183,10 @@
           .join('\n')
       }
 
-      // Parse YAML to inputs (and extract policy from the first rule)
+      // Parse YAML to policy-grouped inputs
       // Throws on incomplete/malformed lines so callers can skip sync
       function parseYamlToInputs(yamlContent) {
-        const inputs = {
-          'DOMAIN-KEYWORD': '',
-          'DOMAIN-SUFFIX': '',
-          'PROCESS-NAME': '',
-          'PROCESS-NAME-REGEX': '',
-        }
+        const inputsByPolicy = createEmptyInputsByPolicy()
 
         const lines = yamlContent.split('\n')
         const prepend = []
@@ -217,51 +214,47 @@
           }
         }
 
-        let parsedPolicy = null
-        if (prepend.length > 0) {
-          const parts = prepend[0].split(',')
-          if (parts.length >= 3) {
-            parsedPolicy = parts.slice(2).join(',')
-          }
-        }
-
-        const grouped = {}
-        for (const type of RULE_TYPES) {
-          grouped[type.key] = []
-        }
+        const grouped = Object.fromEntries(
+          POLICY_GROUPS.map(policy => [
+            policy,
+            Object.fromEntries(RULE_TYPES.map(type => [type.key, []])),
+          ])
+        )
 
         for (const rule of prepend) {
+          const firstComma = rule.indexOf(',')
+          const lastComma = rule.lastIndexOf(',')
+          if (firstComma <= 0 || lastComma <= firstComma + 1) throw new Error('Malformed rule')
+
+          const type = rule.slice(0, firstComma)
+          const value = rule.slice(firstComma + 1, lastComma)
+          const policy = rule.slice(lastComma + 1)
+          if (grouped[policy]?.[type]) grouped[policy][type].push(value)
+        }
+
+        for (const policy of POLICY_GROUPS) {
           for (const type of RULE_TYPES) {
-            if (rule.startsWith(type.key + ',')) {
-              const parts = rule.split(',')
-              if (parts.length >= 2) {
-                grouped[type.key].push(parts[1])
-              }
-              break
-            }
+            inputsByPolicy[policy][type.key] = grouped[policy][type.key].join('\n')
           }
         }
 
-        for (const type of RULE_TYPES) {
-          inputs[type.key] = grouped[type.key].join('\n')
-        }
-
-        return { inputs, parsedPolicy }
+        return inputsByPolicy
       }
 
       // Generate YAML from inputs
-      function generateYaml(inputs, policy) {
-        const targetPolicy = policy || DEFAULT_POLICY
+      function generateYaml(inputsByPolicy) {
         const rules = []
 
         for (const type of RULE_TYPES) {
-          const values = inputs[type.key]
-            .split('\n')
-            .map(v => v.trim())
-            .filter(v => v.length > 0)
+          for (const policy of POLICY_GROUPS) {
+            const values = inputsByPolicy[policy][type.key]
+              .split('\n')
+              .map(v => v.trim())
+              .filter(v => v.length > 0)
 
-          for (const value of values) {
-            rules.push(`${type.key},${value},${targetPolicy}`)
+            for (const value of values) {
+              rules.push(`${type.key},${value},${policy}`)
+            }
           }
         }
 
@@ -271,6 +264,74 @@
 ${prependLines || '  []'}
 append: []
 delete: []`
+      }
+
+      function createEmptyInputsByPolicy() {
+        return Object.fromEntries(POLICY_GROUPS.map(policy => [policy, createEmptyRuleInputs()]))
+      }
+
+      function createEmptyRuleInputs() {
+        return Object.fromEntries(RULE_TYPES.map(type => [type.key, '']))
+      }
+
+      function createDefaultInputsByPolicy() {
+        const inputsByPolicy = createEmptyInputsByPolicy()
+        inputsByPolicy[DEFAULT_POLICY] = { ...DEFAULT_INPUTS }
+        return inputsByPolicy
+      }
+
+      function loadSavedConfig() {
+        try {
+          const saved = localStorage.getItem(STORAGE_KEY)
+          if (saved) return normalizeSavedConfig(JSON.parse(saved))
+
+          const legacySaved = localStorage.getItem(LEGACY_STORAGE_KEY)
+          if (!legacySaved) return null
+
+          const migrated = migrateLegacyConfig(JSON.parse(legacySaved))
+          saveConfig(migrated)
+          localStorage.removeItem(LEGACY_STORAGE_KEY)
+          return migrated
+        } catch (e) {
+          console.error('Failed to load saved config:', e)
+          return null
+        }
+      }
+
+      function normalizeSavedConfig(saved) {
+        const inputsByPolicy = createEmptyInputsByPolicy()
+
+        for (const policy of POLICY_GROUPS) {
+          for (const type of RULE_TYPES) {
+            const value = saved.inputsByPolicy?.[policy]?.[type.key]
+            inputsByPolicy[policy][type.key] = typeof value === 'string' ? value : ''
+          }
+        }
+
+        return {
+          inputsByPolicy,
+          selectedPolicy: POLICY_GROUPS.includes(saved.selectedPolicy) ? saved.selectedPolicy : DEFAULT_POLICY,
+          yaml: typeof saved.yaml === 'string' ? saved.yaml : generateYaml(inputsByPolicy),
+        }
+      }
+
+      function migrateLegacyConfig(saved) {
+        const inputsByPolicy = createEmptyInputsByPolicy()
+        const policy = POLICY_GROUPS.includes(saved.policy) ? saved.policy : DEFAULT_POLICY
+        for (const type of RULE_TYPES) {
+          const value = saved.inputs?.[type.key]
+          inputsByPolicy[policy][type.key] = typeof value === 'string' ? value : ''
+        }
+
+        return { inputsByPolicy, selectedPolicy: policy, yaml: generateYaml(inputsByPolicy) }
+      }
+
+      function saveConfig(config) {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(config))
+        } catch (e) {
+          console.error('Failed to save config:', e)
+        }
       }
 
       // Copy button component
@@ -407,14 +468,8 @@ delete: []`
 
       // Main App
       function App() {
-        const [inputs, setInputs] = useState({
-          'DOMAIN-KEYWORD': '',
-          'DOMAIN-SUFFIX': '',
-          'PROCESS-NAME': '',
-          'PROCESS-NAME-REGEX': '',
-        })
-
-        const [policy, setPolicy] = useState(DEFAULT_POLICY)
+        const [inputsByPolicy, setInputsByPolicy] = useState(createEmptyInputsByPolicy)
+        const [selectedPolicy, setSelectedPolicy] = useState(DEFAULT_POLICY)
         const [yamlContent, setYamlContent] = useState('')
         const isUpdatingFromYaml = useRef(false)
         const isUpdatingFromInputs = useRef(false)
@@ -428,20 +483,15 @@ delete: []`
 
         // Load from localStorage on mount
         useEffect(() => {
-          const saved = localStorage.getItem(STORAGE_KEY)
+          const saved = loadSavedConfig()
           if (saved) {
-            try {
-              const parsed = JSON.parse(saved)
-              const savedPolicy = parsed.policy || DEFAULT_POLICY
-              setInputs(parsed.inputs || {})
-              setPolicy(savedPolicy)
-              setYamlContent(parsed.yaml || generateYaml(parsed.inputs || {}, savedPolicy))
-            } catch (e) {
-              console.error('Failed to parse saved config:', e)
-            }
+            setInputsByPolicy(saved.inputsByPolicy)
+            setSelectedPolicy(saved.selectedPolicy)
+            setYamlContent(saved.yaml)
           } else {
-            setInputs(DEFAULT_INPUTS)
-            setYamlContent(generateYaml(DEFAULT_INPUTS, DEFAULT_POLICY))
+            const defaultInputs = createDefaultInputsByPolicy()
+            setInputsByPolicy(defaultInputs)
+            setYamlContent(generateYaml(defaultInputs))
           }
         }, [])
 
@@ -463,11 +513,9 @@ delete: []`
               e.preventDefault()
               try {
                 isUpdatingFromYaml.current = true
-                const { inputs: parsed, parsedPolicy } = parseYamlToInputs(text)
-                const newPolicy = parsedPolicy || policy
-                setInputs(parsed)
-                setPolicy(newPolicy)
-                setYamlContent(generateYaml(parsed, newPolicy))
+                const parsed = parseYamlToInputs(text)
+                setInputsByPolicy(parsed)
+                setYamlContent(generateYaml(parsed))
               } catch (err) {
                 // Malformed paste, ignore
               } finally {
@@ -480,14 +528,14 @@ delete: []`
 
           document.addEventListener('paste', handlePaste)
           return () => document.removeEventListener('paste', handlePaste)
-        }, [policy])
+        }, [])
 
         // Save to localStorage
         useEffect(() => {
           if (yamlContent) {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify({ inputs, yaml: yamlContent, policy }))
+            saveConfig({ inputsByPolicy, yaml: yamlContent, selectedPolicy })
           }
-        }, [inputs, yamlContent, policy])
+        }, [inputsByPolicy, yamlContent, selectedPolicy])
 
         // Update YAML when inputs change
         const handleInputChange = useCallback(
@@ -495,24 +543,23 @@ delete: []`
             if (isUpdatingFromYaml.current) return
 
             isUpdatingFromInputs.current = true
-            const newInputs = { ...inputs, [key]: value }
-            setInputs(newInputs)
-            setYamlContent(generateYaml(newInputs, policy))
+            const newInputsByPolicy = {
+              ...inputsByPolicy,
+              [selectedPolicy]: { ...inputsByPolicy[selectedPolicy], [key]: value },
+            }
+            setInputsByPolicy(newInputsByPolicy)
+            setYamlContent(generateYaml(newInputsByPolicy))
             setTimeout(() => {
               isUpdatingFromInputs.current = false
             }, 0)
           },
-          [inputs, policy]
+          [inputsByPolicy, selectedPolicy]
         )
 
         // Handle policy change
-        const handlePolicyChange = useCallback(
-          newPolicy => {
-            setPolicy(newPolicy)
-            setYamlContent(generateYaml(inputs, newPolicy))
-          },
-          [inputs]
-        )
+        const handlePolicyChange = useCallback(newPolicy => {
+          if (POLICY_GROUPS.includes(newPolicy)) setSelectedPolicy(newPolicy)
+        }, [])
 
         // Handle YAML edit: one-way sync YAML → inputs
         const handleYamlChange = useCallback(newYaml => {
@@ -521,9 +568,7 @@ delete: []`
           setYamlContent(newYaml)
           try {
             isUpdatingFromYaml.current = true
-            const { inputs: parsed, parsedPolicy } = parseYamlToInputs(newYaml)
-            setInputs(parsed)
-            if (parsedPolicy) setPolicy(parsedPolicy)
+            setInputsByPolicy(parseYamlToInputs(newYaml))
           } catch (e) {
             // Parse error (user may still be typing), skip sync to inputs
           } finally {
@@ -535,32 +580,30 @@ delete: []`
 
         // Format & sort all inputs, regenerate YAML
         const handleFormat = useCallback(() => {
-          const sorted = {}
-          for (const type of RULE_TYPES) {
-            sorted[type.key] = sortLines(inputs[type.key])
+          const sorted = createEmptyInputsByPolicy()
+          for (const policy of POLICY_GROUPS) {
+            for (const type of RULE_TYPES) {
+              sorted[policy][type.key] = sortLines(inputsByPolicy[policy][type.key])
+            }
           }
-          setInputs(sorted)
-          setYamlContent(generateYaml(sorted, policy))
-        }, [inputs, policy])
+          setInputsByPolicy(sorted)
+          setYamlContent(generateYaml(sorted))
+        }, [inputsByPolicy])
 
         // Clear all
         const handleClear = () => {
-          const emptyInputs = {
-            'DOMAIN-KEYWORD': '',
-            'DOMAIN-SUFFIX': '',
-            'PROCESS-NAME': '',
-            'PROCESS-NAME-REGEX': '',
-          }
-          setInputs(emptyInputs)
-          setPolicy(DEFAULT_POLICY)
-          setYamlContent(generateYaml(emptyInputs, DEFAULT_POLICY))
+          const emptyInputs = createEmptyInputsByPolicy()
+          setInputsByPolicy(emptyInputs)
+          setSelectedPolicy(DEFAULT_POLICY)
+          setYamlContent(generateYaml(emptyInputs))
         }
 
         // Reset to default
         const handleReset = () => {
-          setInputs(DEFAULT_INPUTS)
-          setPolicy(DEFAULT_POLICY)
-          setYamlContent(generateYaml(DEFAULT_INPUTS, DEFAULT_POLICY))
+          const defaultInputs = createDefaultInputsByPolicy()
+          setInputsByPolicy(defaultInputs)
+          setSelectedPolicy(DEFAULT_POLICY)
+          setYamlContent(generateYaml(defaultInputs))
         }
 
         return (
@@ -590,7 +633,30 @@ delete: []`
                 {/* Left: Input Tools */}
                 <div className="space-y-4">
                   <div className="flex items-center justify-between mb-2">
-                    <h2 className="text-lg font-semibold text-gray-800">Rule Input</h2>
+                    <fieldset>
+                      <legend className="sr-only">Target Policy Group</legend>
+                      <div className="inline-flex overflow-hidden rounded-lg border border-gray-300 bg-white shadow-sm">
+                        {POLICY_GROUPS.map(policy => {
+                          const isSelected = policy === selectedPolicy
+
+                          return (
+                            <button
+                              key={policy}
+                              type="button"
+                              aria-pressed={isSelected}
+                              onClick={() => handlePolicyChange(policy)}
+                              className={`px-4 py-2 text-sm font-semibold transition-colors first:border-r first:border-gray-300 focus:z-10 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500 ${
+                                isSelected
+                                  ? 'bg-blue-500 text-white'
+                                  : 'bg-white text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                              }`}
+                            >
+                              {policy}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </fieldset>
                     <div className="flex items-center gap-1">
                       <button
                         onClick={handleReset}
@@ -619,17 +685,13 @@ delete: []`
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     {RULE_TYPES.map(type => (
-                      <InputCard key={type.key} type={type} value={inputs[type.key]} onChange={handleInputChange} />
+                      <InputCard
+                        key={type.key}
+                        type={type}
+                        value={inputsByPolicy[selectedPolicy][type.key]}
+                        onChange={handleInputChange}
+                      />
                     ))}
-                  </div>
-                  <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Target Policy Group</label>
-                    <input
-                      type="text"
-                      value={policy}
-                      onChange={e => handlePolicyChange(e.target.value)}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-gray-50"
-                    />
                   </div>
                 </div>
 
