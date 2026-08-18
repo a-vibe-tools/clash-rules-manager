@@ -471,8 +471,10 @@ delete: []`
         const [inputsByPolicy, setInputsByPolicy] = useState(createEmptyInputsByPolicy)
         const [selectedPolicy, setSelectedPolicy] = useState(DEFAULT_POLICY)
         const [yamlContent, setYamlContent] = useState('')
+        const [formatted, setFormatted] = useState(false)
         const isUpdatingFromYaml = useRef(false)
         const isUpdatingFromInputs = useRef(false)
+        const formatFeedbackTimer = useRef(null)
 
         // Reveal UI after mount so Tailwind CDN has time to generate styles
         useEffect(() => {
@@ -480,6 +482,8 @@ delete: []`
             document.getElementById('root').classList.add('ready')
           }, 100)
         }, [])
+
+        useEffect(() => () => clearTimeout(formatFeedbackTimer.current), [])
 
         // Load from localStorage on mount
         useEffect(() => {
@@ -588,6 +592,9 @@ delete: []`
           }
           setInputsByPolicy(sorted)
           setYamlContent(generateYaml(sorted))
+          setFormatted(true)
+          clearTimeout(formatFeedbackTimer.current)
+          formatFeedbackTimer.current = setTimeout(() => setFormatted(false), 2000)
         }, [inputsByPolicy])
 
         // Clear all
@@ -702,17 +709,30 @@ delete: []`
                     <div className="flex items-center gap-2">
                       <button
                         onClick={handleFormat}
-                        className="copy-btn px-3 py-1.5 rounded-lg font-medium text-sm flex items-center gap-1.5 bg-blue-500 hover:bg-blue-600 text-white"
+                        className={`copy-btn px-3 py-1.5 rounded-lg font-medium text-sm flex items-center gap-1.5 ${
+                          formatted ? 'bg-green-500 text-white' : 'bg-blue-500 hover:bg-blue-600 text-white'
+                        }`}
                       >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12"
-                          />
-                        </svg>
-                        Format
+                        {formatted ? (
+                          <>
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                            Formatted
+                          </>
+                        ) : (
+                          <>
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12"
+                              />
+                            </svg>
+                            Format
+                          </>
+                        )}
                       </button>
                       <CopyButton text={yamlContent} />
                     </div>
